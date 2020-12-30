@@ -5,6 +5,8 @@ import crypto from 'crypto';
 import os from 'os';
 import { promisify } from 'util';
 
+import webpack from 'webpack';
+
 import { sync as makeDirSync } from 'mkdirp';
 import findCacheDir from 'find-cache-dir';
 import prettyBytes from 'pretty-bytes';
@@ -97,83 +99,105 @@ class ConvertCacheAssetWebpackPlugin {
   }
 
   apply(compiler) {
-    compiler.hooks.emit.tapPromise(NAMESPACE, async (compilation) =>
-      Promise.all(
-        Object.entries(compilation.assets).map(async ([name, asset]) => {
-          const buffer = asset.source();
-
-          return Promise.all(
-            this.configs.map(async (config) => {
-              if (config.test.test(name)) {
-                // Compute file name
-                let convertedAssetName = name;
-
-                if (config.overrideExtension) {
-                  convertedAssetName = name.split('.').slice(0, -1).join('.');
-                }
-                convertedAssetName = config.filename(convertedAssetName);
-
-                // Check cache first
-                let filePath;
-                let convertedBuffer;
-                let logMessage = '';
-
-                if (config.cache) {
-                  filePath = ConvertCacheAssetWebpackPlugin.getCachedAssetPath(
-                    buffer,
-                    config.cacheDir
-                  );
-                  convertedBuffer = await ConvertCacheAssetWebpackPlugin.getCachedAsset(
-                    filePath
-                  );
-                }
-
-                // Convert if not in cache
-                if (!convertedBuffer) {
-                  convertedBuffer = await config.convertBuffer(buffer);
-
-                  if (config.cache) {
-                    await ConvertCacheAssetWebpackPlugin.setCachedAsset(
-                      filePath,
-                      convertedBuffer
-                    );
-                  }
-                } else if (config.verbose) {
-                  logMessage += `(cache) `;
-                }
-
-                // Add converted asset to compilation assets
-                // eslint-disable-next-line no-param-reassign
-                compilation.assets[convertedAssetName] = {
-                  source: () => convertedBuffer,
-                  size: () => convertedBuffer.length,
-                };
-
-                // Compute difference
-                const delta = ConvertCacheAssetWebpackPlugin.getDelta(
-                  buffer,
-                  convertedBuffer
-                );
-                if (config.verbose) {
-                  logMessage += `${name} -> ${convertedAssetName}: ${prettyBytes(
-                    delta,
-                    { signed: true }
-                  )}`;
-                  console.log(GREEN, logMessage);
-                }
-
-                return Promise.resolve(delta);
-              }
-
-              return Promise.resolve(0);
-            })
+    const processCompilation = async (compilation, assets) =>
+      this.addAssets(compilation, assets)
+        .then((deltas) => {
+          console.log(
+            `${NAMESPACE} ${prettyBytes(
+              deltas.flat().reduce((acc, cur) => acc + cur, 0)
+            )}`
           );
         })
-      ).then((deltas) => {
-        console.log(
-          `${NAMESPACE} ${prettyBytes(
-            deltas.flat().reduce((acc, cur) => acc + cur, 0)
-          )}`
+        .catch((error) => compilation.errors.push(error));
+
+    if (webpack.version.startsWith('4.')) {
+      compiler.hooks.emit.tapPromise(NAMESPACE, (compilation) =>
+        processCompilation(compilation, compilation.assets)
+      );
+    } else {
+      compiler.hooks.thisCompilation.tap(NAMESPACE, (compilation) => {
+        compilation.hooks.processAssets.tapPromise(
+          {
+            name: NAMESPACE,
+            stage: webpack.Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL,
+            addiontalAssets: true,
+          },
+          (assets) => processCompilation(compilation, assets)
+        );
+      });
+    }
+  }
+
+  async addAssets(compilation, assets) {
+    return Promise.all(
+      Object.entries(assets).map(async ([name, asset]) => {
+        const buffer = asset.source();
+
+        return Promise.all(
+          this.configs.map(async (config) => {
+            if (config.test.test(name)) {
+              // Compute file name
+              let convertedAssetName = name;
+
+              if (config.overrideExtension) {
+                convertedAssetName = name.split('.').slice(0, -1).join('.');
+              }
+              convertedAssetName = config.filename(convertedAssetName);
+
+              // Check cache first
+              let filePath;
+              let convertedBuffer;
+              let logMessage = '';
+
+              if (config.cache) {
+                filePath = ConvertCacheAssetWebpackPlugin.getCachedAssetPath(
+                  buffer,
+                  config.cacheDir
+                );
+                convertedBuffer = await ConvertCacheAssetWebpackPlugin.getCachedAsset(
+                  filePath
+                );
+              }
+
+              // Convert if not in cache
+              if (!convertedBuffer) {
+                convertedBuffer = await config.convertBuffer(buffer);
+
+                if (config.cache) {
+                  await ConvertCacheAssetWebpackPlugin.setCachedAsset(
+                    filePath,
+                    convertedBuffer
+                  );
+                }
+              } else if (config.verbose) {
+                logMessage += ` (cache)`;
+              }
+
+              // Add converted asset to compilation assets
+              // eslint-disable-next-line no-param-reassign
+              compilation.assets[convertedAssetName] = {
+                source: () => convertedBuffer,
+                size: () => convertedBuffer.length,
+              };
+
+              // Compute difference
+              const delta = ConvertCacheAssetWebpackPlugin.getDelta(
+                buffer,
+                convertedBuffer
+              );
+              if (config.verbose) {
+                logMessage += ` ${name} -> ${convertedAssetName}: ${prettyBytes(
+                  delta,
+                  { signed: true }
+                )}`;
+                console.log(GREEN, logMessage);
+              }
+
+              return Promise.resolve(delta);
+            }
+
+            return Promise.resolve(0);
+          })
         );
       })
     );
