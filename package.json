@@ -1,6 +1,6 @@
 {
   "name": "convert-assets-webpack-plugin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Convert compiled files buffer loaded by webpack using any package and choosing their output location.",
   "license": "ISC",
   "repository": "https://github.com/dmnsgn/convert-assets-webpack-plugin",
